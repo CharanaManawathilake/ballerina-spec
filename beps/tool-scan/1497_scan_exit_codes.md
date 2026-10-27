@@ -70,7 +70,7 @@ The design has three parts: the standard exit codes with a `kind` for each failu
 | --- | --- | --- | --- |
 | `0` | Success | The scan completed, and no gate is set or the gate was not tripped | `0` |
 | `1` | Runtime error | The gate was tripped, or the scan could not be completed: a configuration, plugin, compilation or report error, or an unexpected exception | `0`, or `1` for compilation errors and report write failures |
-| `2` | Usage error | Invalid command-line input: an unknown `--format` (`ERROR_017`), an invalid `--fail-on-severity` or `--fail-on-count` value, both include and exclude rules (`ERROR_016`), or an unknown rule ID (`ERROR_015`) | `0` |
+| `2` | Usage error | Invalid command-line input: an unknown `--format` (`ERROR_017`), an invalid `--fail-on-severity`, `--fail-on-count` or `--output-format` value, both include and exclude rules (`ERROR_016`), or an unknown rule ID (`ERROR_015`) | `0` |
 | `3` | Invalid target | The path does not exist or cannot be loaded as a project, the project has load diagnostics such as an invalid `Ballerina.toml`, or the path is a `.bal` file inside a package | `0` |
 | `130` | Interrupted | The scan was interrupted with SIGINT | `130` |
 
@@ -101,7 +101,7 @@ This split means that:
 
 Error reports follow section 7 of the Ballerina CLI Tool Design Guide. Scan tool 0.12.0 prints errors as plain text on standard output, has no JSON error output and no `--output-format` option. The format below, the JSON form and the option are introduced by this proposal.
 
-An error report is written to standard error, in text or in JSON. The new `--output-format <text|json>` option selects the format. Without it, the format is text when standard output is a terminal, and JSON otherwise.
+An error report is written to standard error, in text or in JSON. The new `--output-format <text|json>` option selects the format. Without it, the format is text when standard output is a terminal, and JSON otherwise. An invalid `--output-format` value is a `usage` error, reported in this default format.
 
 In text, an error report is `bal scan: error: <message>`. The message names the path, option or value involved, is one line, starts in lowercase (a number, path or name stays as written), and has no trailing period or stack trace. The text form does not show the `kind`.
 
@@ -143,7 +143,11 @@ Usage: bal scan [OPTIONS] [<package>]
 Try 'bal scan --help' for more information.
 ```
 
-Warnings, such as a deprecated option, are reported as `bal scan: warning: <message>` and never change the exit code.
+Warnings, such as a deprecated option, are reported in the same format as error reports: `bal scan: warning: <message>` in text, and one object on one line in JSON. A warning has no `kind` and never changes the exit code.
+
+```
+{"severity":"warning","message":"--example-option is deprecated; use --new-option"}
+```
 
 ### Gate
 
@@ -249,13 +253,13 @@ Each stage of a scan can stop it with its own exit code and `kind`. The gate is 
 
 ## Testing
 
-- **Exit codes and kinds.** Unit tests replace the exit handler and assert the code and the `kind` for each situation in the [error kinds](#error-kinds) table: invalid options, an invalid path, a `.bal` file inside a package, load diagnostics, each `Scan.toml` and remote configuration error, a failed download, compilation errors, an empty package, a plugin that fails to load, a missing platform, a platform plugin that throws, and a report write failure. An interrupt exits with `130` and writes no error report.
+- **Exit codes and kinds.** Unit tests replace the exit handler and assert the code and the `kind` for each situation in the [error kinds](#error-kinds) table: invalid options, including an invalid `--output-format` value, an invalid path, a `.bal` file inside a package, load diagnostics, each `Scan.toml` and remote configuration error, a failed download, compilation errors, an empty package, a plugin that fails to load, a missing platform, a platform plugin that throws, and a report write failure. An interrupt exits with `130` and writes no error report.
 - **Gate.** Tests cover each row of the [gate](#gate) table against packages with issues of each severity, including counts just below, at and above the limit. They also cover precedence of each setting between the command line and `Scan.toml`, `--fail-on-severity=NONE` overriding `Scan.toml`, case-insensitive severities, invalid severities and counts (`0`, negative and non-numeric) from both sources, issues excluded by `--include-rules`, `--exclude-rules` and inline suppressions, and plugin rules without a severity.
 - **Default.** A scan with issues of every severity and no gate exits with `0`.
 - **Errors win.** A scan with both a tripped gate and an error reports the error `kind`, not `gate-failed`, including with `--fail-on-severity=NONE`.
 - **Workspaces.** A workspace with a mix of clean packages, packages with issues, empty packages and packages with errors scans every package, counts issues across packages, and reports every failing package in the error report. Packages that fail with different kinds give the top-level `kind` and exit code set by the order in the [gate](#gate) rules.
 - **Reports.** A scan that fails with `gate-failed` still writes `scan_results.json`, SARIF and the HTML report with every issue.
-- **Error reports.** Text reports follow the `bal scan: error: <message>` form, `Scan.toml` problems are reported as `<path>:<line>:<col>` diagnostics, and usage errors print the synopsis and help pointer but not the full help. With `--output-format json`, or when standard output is not a terminal, each report is one JSON object on one line with the documented `kind`, and `--output-format text` gives text in either case.
+- **Error reports.** Text reports follow the `bal scan: error: <message>` form, `Scan.toml` problems are reported as `<path>:<line>:<col>` diagnostics, and usage errors print the synopsis and help pointer but not the full help. With `--output-format json`, or when standard output is not a terminal, each report is one JSON object on one line with the documented `kind`, and `--output-format text` gives text in either case. Warnings follow the same format, as `bal scan: warning: <message>` in text and as a JSON object with `severity` `warning` and no `kind`. An invalid `--output-format` value is reported in the default format.
 - **Output streams.** Error diagnostics and the error report are written to standard error, not standard output.
 
 ## Risks and Assumptions

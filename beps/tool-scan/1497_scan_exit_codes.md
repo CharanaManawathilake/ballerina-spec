@@ -12,7 +12,7 @@
 This proposal gives `bal scan` a documented set of exit codes and an opt-in gate, so whatever runs the scan, such as a script, a Git hook or a CI/CD pipeline, can fail on findings and tell findings apart from configuration errors and tool failures.
 
 - `bal scan` uses the standard exit codes of Ballerina CLI tools: `0` for success, `1` for a runtime error, `2` for a usage error, `3` for an invalid target and `130` for an interrupt. A tripped gate exits with `1`.
-- Every failure is reported on standard error with a `kind`, such as `gate-failed` or `invalid-config`, so a caller can tell a tripped gate from a tool error without parsing the message.
+- Every failure other than an interrupt is reported on standard error with a `kind`, such as `gate-failed` or `invalid-config`, so a caller can tell a tripped gate from a tool error without parsing the message.
 - Two new options, `--fail-on-severity <BLOCKER|HIGH|MEDIUM|LOW|INFO|NONE>` and `--fail-on-count <n>`, also settable in `Scan.toml`, define the gate. The scan fails when the number of issues at or above the severity reaches the count.
 
 By default no gate is set, so findings never fail the scan and it exits with `0`. Errors, however, always exit with a non-zero code, so a broken `Scan.toml` no longer passes silently.
@@ -27,7 +27,7 @@ Today `bal scan` exits with `0` for almost every outcome, including real failure
 | Scan finished with issues of any severity, `BLOCKER` included | Prints the results, writes `scan_results.json` or SARIF, and returns | `0` |
 | Invalid project path, or a file inside a package | Prints a message to standard output and returns `Optional.empty()` | `0` |
 | Project load diagnostics, such as an invalid `Ballerina.toml` | Prints the errors to standard output and returns | `0` |
-| Empty package (`STATIC_ANALYSIS_ERROR_002`) | Prints an error and returns, or skips the package in a workspace | `0` |
+| Empty package (`ERROR_002`) | Prints an error and returns, or skips the package in a workspace | `0` |
 | `Scan.toml` cannot be read, or a remote configuration or JAR download fails (`ERROR_003` to `ERROR_007`) | `loadScanTomlConfigurations` returns empty and the scan stops | `0` |
 | An external analyzer (compiler plugin) fails to load (`ERROR_008`) | Prints a message and returns | `0` |
 | Both include and exclude rules are given (`ERROR_016`) | Prints an error and returns | `0` |
@@ -49,7 +49,7 @@ Anything that runs `bal scan` and acts on the result needs this contract to fail
 - Keep the scan exiting with `0` on findings unless a gate is set, so existing scripts and pipelines keep passing.
 - Let users fail the scan on a number of issues, on issues at or above a severity, or on both, from the command line or from `Scan.toml`.
 - Make every tool, configuration and project error exit with a non-zero code.
-- Write errors and the gate result to standard error.
+- Write errors and the gate result to standard error, in text or in JSON.
 
 ## Non-Goals
 
@@ -76,7 +76,7 @@ The design has three parts: the standard exit codes with a `kind` for each failu
 
 ### Error kinds
 
-Every failure is reported on standard error with a `kind`. The `kind` says what went wrong, and its core kind decides the exit code.
+Every failure other than an interrupt is reported on standard error with a `kind`. The `kind` says what went wrong, and its core kind decides the exit code. An interrupt exits with `130` and writes no error report, because no core kind maps to `130`.
 
 | `kind` | Core kind | Exit code | When |
 | --- | --- | --- | --- |
@@ -99,20 +99,34 @@ This split means that:
 
 ### Error reports
 
-An error report is written to standard error. In text it is `bal scan: error: <message>`. The message names the path, option or value involved, is one line, starts in lowercase, and has no trailing period or stack trace.
+Error reports follow section 7 of the Ballerina CLI Tool Design Guide. Scan tool 0.12.0 prints errors as plain text on standard output, has no JSON error output and no `--output-format` option. The format below, the JSON form and the option are introduced by this proposal.
+
+An error report is written to standard error, in text or in JSON. The new `--output-format <text|json>` option selects the format. Without it, the format is text when standard output is a terminal, and JSON otherwise.
+
+In text, an error report is `bal scan: error: <message>`. The message names the path, option or value involved, is one line, starts in lowercase (a number, path or name stays as written), and has no trailing period or stack trace. The text form does not show the `kind`.
 
 ```
 bal scan: error: 6 issues at or above MEDIUM, limit 5 (BLOCKER: 1, HIGH: 2, MEDIUM: 3)
 ```
 
-A problem in a file, such as `Scan.toml` or a rules JSON file, is a diagnostic in the form `<path>:<line>:<col>: error: <message>`, under the error report. A diagnostic for `Scan.toml` names the key, not the option.
+In JSON, each report is one object on one line and carries the `kind`. A caller that needs the `kind` reads the JSON form.
+
+```
+{"severity":"error","kind":"gate-failed","message":"6 issues at or above MEDIUM, limit 5 (BLOCKER: 1, HIGH: 2, MEDIUM: 3)"}
+```
+
+A problem in a file, such as `Scan.toml` or a rules JSON file, is a diagnostic. In text it is `<path>:<line>:<col>: error: <message>`, under the error report. In JSON it is an entry of the report's `diagnostics` array. A diagnostic for `Scan.toml` names the key, not the option.
 
 ```
 bal scan: error: Scan.toml has 1 error
 Scan.toml:2:18: error: invalid value 'CRITICAL' for 'failOnSeverity'; expected BLOCKER, HIGH, MEDIUM, LOW, INFO or NONE
 ```
 
-A usage error is followed by a one-line synopsis and a pointer to the help, and not by the full help.
+```
+{"severity":"error","kind":"invalid-config","message":"Scan.toml has 1 error","diagnostics":[{"path":"Scan.toml","line":2,"column":18,"severity":"error","message":"invalid value 'CRITICAL' for 'failOnSeverity'; expected BLOCKER, HIGH, MEDIUM, LOW, INFO or NONE"}]}
+```
+
+In text, a usage error is followed by a one-line synopsis and a pointer to the help, and not by the full help. In JSON it is the same as any other error report, with the `kind` `usage`.
 
 ```
 bal scan: error: invalid value '0' for --fail-on-count; expected a whole number of 1 or more
@@ -120,7 +134,14 @@ Usage: bal scan [OPTIONS] [<package>]
 Try 'bal scan --help' for more information.
 ```
 
-An unknown rule ID is a usage error that names the ID and points to `bal scan --list-rules`. The scan never guesses a near match.
+An unknown rule ID is a usage error that names the ID, with a suggestion to run `bal scan --list-rules`. It has no `Try:` command, because the fix needs a rule ID that only the user can pick. The scan never guesses a near match.
+
+```
+bal scan: error: unknown rule 'ballerina:99'
+  Run 'bal scan --list-rules' to see the available rules.
+Usage: bal scan [OPTIONS] [<package>]
+Try 'bal scan --help' for more information.
+```
 
 Warnings, such as a deprecated option, are reported as `bal scan: warning: <message>` and never change the exit code.
 
@@ -175,7 +196,7 @@ The gate follows these rules.
 6. **Counted issues.** The gate counts the issues left after `--include-rules`, `--exclude-rules` and inline suppressions (`ExcludedIssue`). Excluded issues never count.
 7. **Rules without a severity.** A plugin rule can have no severity (`rule.severity() == null`). Such a rule uses the same fallback as `resolveSarifLevel`: `BUG` counts as `HIGH`, `VULNERABILITY` as `MEDIUM` and `CODE_SMELL` as `LOW`. One mapping serves both SARIF and the gate.
 8. **Errors win.** When both a tool error and a tripped gate occur, the error is reported instead of `gate-failed`, because the issue list may be incomplete. No gate setting, `NONE` included, hides an error.
-9. **Workspaces.** In a workspace, every package is scanned, and the issues of all packages are counted together against the gate. If any package had an error, the scan exits with that error, and the error report lists the error of each failing package in its diagnostics. Otherwise it fails with `gate-failed` if the gate was tripped, and exits with `0` if not. Empty packages are reported as `empty-package` instead of being skipped silently.
+9. **Workspaces.** In a workspace, every package is scanned, and the issues of all packages are counted together against the gate. If any package had an error, the scan writes one error report. Its `kind` is the first, in this order, of the kinds the failing packages had: `invalid-target`, `invalid-config`, `download-failed`, `compilation-error`, `empty-package`, `plugin-error`, `report-error` and `runtime`, which follows the [execution order](#execution-order). The exit code follows that `kind`. The message gives the number of failing packages, and the error of each failing package is a diagnostic that names the package. Otherwise it fails with `gate-failed` if the gate was tripped, and exits with `0` if not. Empty packages are reported as `empty-package` instead of being skipped silently.
 10. **Standard error.** Every error diagnostic moves from `outputStream` to `errorStream`, and the error report is the last thing written to standard error.
 
 ### Execution order
@@ -195,6 +216,17 @@ Each stage of a scan can stop it with its own exit code and `kind`. The gate is 
 - Findings still exit with `0` by default, because no gate is set.
 - Scripts and pipelines that relied on a `0` exit when the project path is invalid, `Scan.toml` is broken, a plugin fails to load or a package is empty will start failing. This is the intent of the change.
 - Compilation errors and report write failures keep exiting with `1`.
+- Where standard output is not a terminal, as in most CI/CD pipelines, error reports and warnings are JSON by default. A pipeline that wants text passes `--output-format text`.
+
+### Deviations from the CLI Tool Design Guide
+
+`bal scan` predates the Ballerina CLI Tool Design Guide and runs on SwanLake, so it departs from the guide in these places.
+
+- **Workspaces.** The guide rejects a workspace root with exit code `3` (TGT-7). `bal scan` keeps its existing workspace support, which the guide lists as a possible future extension.
+- **Standard output on failure.** The guide requires standard output to be empty on failure (OUT-7). A scan that fails after the results are printed, such as with `gate-failed`, still has them on standard output, because the results are complete and the gate is a verdict on them.
+- **Output format.** `--output-format` applies to error reports and warnings on standard error. The console results on standard output stay text, since `scan_results.json` and SARIF already provide machine-readable results.
+- **Rendering and exit.** The guide expects the platform to render results and the launcher to exit with the code the tool's error carries (OUT-4). SwanLake has no such layer, so the scan tool writes its own output, and until the launcher lets `BLauncherException` carry an exit code, the scan tool exits on its own.
+- **Report format option.** The existing `--format` option keeps its name. The guide names such an option `--report-format`, to avoid confusion with `--output-format` (INV-12). Renaming it is left to a separate proposal.
 
 ## Alternatives
 
@@ -217,27 +249,27 @@ Each stage of a scan can stop it with its own exit code and `kind`. The gate is 
 
 ## Testing
 
-- **Exit codes and kinds.** Unit tests replace the exit handler and assert the code and the `kind` for each situation in the [error kinds](#error-kinds) table: invalid options, an invalid path, a `.bal` file inside a package, load diagnostics, each `Scan.toml` and remote configuration error, a failed download, compilation errors, an empty package, a plugin that fails to load, a missing platform, a platform plugin that throws, a report write failure, and an interrupt.
+- **Exit codes and kinds.** Unit tests replace the exit handler and assert the code and the `kind` for each situation in the [error kinds](#error-kinds) table: invalid options, an invalid path, a `.bal` file inside a package, load diagnostics, each `Scan.toml` and remote configuration error, a failed download, compilation errors, an empty package, a plugin that fails to load, a missing platform, a platform plugin that throws, and a report write failure. An interrupt exits with `130` and writes no error report.
 - **Gate.** Tests cover each row of the [gate](#gate) table against packages with issues of each severity, including counts just below, at and above the limit. They also cover precedence of each setting between the command line and `Scan.toml`, `--fail-on-severity=NONE` overriding `Scan.toml`, case-insensitive severities, invalid severities and counts (`0`, negative and non-numeric) from both sources, issues excluded by `--include-rules`, `--exclude-rules` and inline suppressions, and plugin rules without a severity.
 - **Default.** A scan with issues of every severity and no gate exits with `0`.
 - **Errors win.** A scan with both a tripped gate and an error reports the error `kind`, not `gate-failed`, including with `--fail-on-severity=NONE`.
-- **Workspaces.** A workspace with a mix of clean packages, packages with issues, empty packages and packages with errors scans every package, counts issues across packages, and reports every failing package in the error report.
+- **Workspaces.** A workspace with a mix of clean packages, packages with issues, empty packages and packages with errors scans every package, counts issues across packages, and reports every failing package in the error report. Packages that fail with different kinds give the top-level `kind` and exit code set by the order in the [gate](#gate) rules.
 - **Reports.** A scan that fails with `gate-failed` still writes `scan_results.json`, SARIF and the HTML report with every issue.
-- **Error reports.** Text reports follow the `bal scan: error: <message>` form, `Scan.toml` problems are reported as `<path>:<line>:<col>` diagnostics, and usage errors print the synopsis and help pointer but not the full help.
+- **Error reports.** Text reports follow the `bal scan: error: <message>` form, `Scan.toml` problems are reported as `<path>:<line>:<col>` diagnostics, and usage errors print the synopsis and help pointer but not the full help. With `--output-format json`, or when standard output is not a terminal, each report is one JSON object on one line with the documented `kind`, and `--output-format text` gives text in either case.
 - **Output streams.** Error diagnostics and the error report are written to standard error, not standard output.
 
 ## Risks and Assumptions
 
 - Scripts and pipelines that pass today because errors exit with `0` will start failing after the upgrade. The release notes list the affected situations, their exit codes and kinds.
-- A tripped gate and a tool error share exit code `1`. A caller that treats them differently must read the `kind` from the error report. The documentation must make this clear.
-- Calling `Runtime.getRuntime().exit` from a tool bypasses the launcher's own exit handling. This assumes the launcher does no work after a tool command returns that the scan tool would skip.
+- A tripped gate and a tool error share exit code `1`. A caller that treats them differently must read the `kind` from the JSON error report. The documentation must make this clear.
+- Until the launcher can carry an exit code, the scan tool calls `Runtime.getRuntime().exit`, which bypasses the launcher's own exit handling. This assumes the launcher does no work after a tool command returns that the scan tool would skip.
 - Some tools and wrappers may parse `bal scan` standard output for errors. Moving error diagnostics to standard error changes what they see.
 - Many tools use a "maximum allowed" count, which fails above the number. `--fail-on-count` fails at the number. The name and the documentation must make this clear to avoid off-by-one gates.
 
 ## Dependencies
 
 - The scan tool's existing `Severity` enum and the `resolveSarifLevel` fallback.
-- The `bal` launcher in ballerina-lang, only if the launcher is changed to let `BLauncherException` carry an exit code.
+- The `bal` launcher in ballerina-lang, to let `BLauncherException` carry an exit code, as the guide expects (OUT-4). Until then the scan tool exits on its own.
 
 ## Future Work
 

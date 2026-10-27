@@ -222,16 +222,6 @@ Each stage of a scan can stop it with its own exit code and `kind`. The gate is 
 - Compilation errors and report write failures keep exiting with `1`.
 - Where standard output is not a terminal, as in most CI/CD pipelines, error reports and warnings are JSON by default. A pipeline that wants text passes `--output-format text`.
 
-### Deviations from the CLI Tool Design Guide
-
-`bal scan` predates the Ballerina CLI Tool Design Guide and runs on SwanLake, so it departs from the guide in these places.
-
-- **Workspaces.** The guide rejects a workspace root with exit code `3` (TGT-7). `bal scan` keeps its existing workspace support, which the guide lists as a possible future extension.
-- **Standard output on failure.** The guide requires standard output to be empty on failure (OUT-7). A scan that fails after the results are printed, such as with `gate-failed`, still has them on standard output, because the results are complete and the gate is a verdict on them.
-- **Output format.** `--output-format` applies to error reports and warnings on standard error. The console results on standard output stay text, since `scan_results.json` and SARIF already provide machine-readable results.
-- **Rendering and exit.** The guide expects the platform to render results and the launcher to exit with the code the tool's error carries (OUT-4). SwanLake has no such layer, so the scan tool writes its own output, and until the launcher lets `BLauncherException` carry an exit code, the scan tool exits on its own.
-- **Report format option.** The existing `--format` option keeps its name. The guide names such an option `--report-format`, to avoid confusion with `--output-format` (INV-12). Renaming it is left to a separate proposal.
-
 ## Alternatives
 
 **One exit code per severity.** The exit code would be the highest severity found, for example `1` for `INFO` up to `5` for `BLOCKER`. This is not possible under the Ballerina CLI Tool Design Guide.

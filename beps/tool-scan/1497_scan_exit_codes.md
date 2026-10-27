@@ -238,14 +238,12 @@ Each stage of a scan can stop it with its own exit code and `kind`. The gate is 
 
 - The scan tool's existing `Severity` enum and the `resolveSarifLevel` fallback.
 - The `bal` launcher in ballerina-lang, only if the launcher is changed to let `BLauncherException` carry an exit code.
-- The SonarQube language and platform plugins in `sonar-ballerina`, which run `bal scan` and act on its exit code.
 
 ## Future Work
 
 - **Per-severity count limits.** A table in `Scan.toml` with a separate count for each severity, for example failing on one `BLOCKER` or on ten `MEDIUM` issues.
 - **New-code gating.** A baseline file, or a `--new-code-since <commit>` option, so a team can gate on the issues a change introduces without first fixing every existing issue.
 - **Per-rule severity overrides** in `Scan.toml`, so a team can raise or lower the severity of a rule for gating and reports.
-- **Launcher support for exit codes**, so the scan tool throws one exception type that carries the exit code and the `kind`, and no longer exits the process itself.
 
 ## References
 

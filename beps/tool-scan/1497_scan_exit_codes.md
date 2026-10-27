@@ -70,7 +70,7 @@ The design has three parts: the standard exit codes with a `kind` for each failu
 | --- | --- | --- | --- |
 | `0` | Success | The scan completed, and no gate is set or the gate was not tripped | `0` |
 | `1` | Runtime error | The gate was tripped, or the scan could not be completed: a configuration, plugin, compilation or report error, or an unexpected exception | `0`, or `1` for compilation errors and report write failures |
-| `2` | Usage error | Invalid command-line input: an unknown `--format` (`ERROR_017`), an invalid `--fail-on-severity`, `--fail-on-count` or `--output-format` value, both include and exclude rules (`ERROR_016`), or an unknown rule ID (`ERROR_015`) | `0` |
+| `2` | Usage error | Invalid command-line input: an invalid option value, such as an unknown `--format` (`ERROR_017`) or an invalid `--fail-on-severity` value, both include and exclude rules (`ERROR_016`), or an unknown rule ID (`ERROR_015`) | `0` |
 | `3` | Invalid target | The path does not exist or cannot be loaded as a project, the project has load diagnostics such as an invalid `Ballerina.toml`, or the path is a `.bal` file inside a package | `0` |
 | `130` | Interrupted | The scan was interrupted with SIGINT | `130` |
 
@@ -134,7 +134,7 @@ Usage: bal scan [OPTIONS] [<package>]
 Try 'bal scan --help' for more information.
 ```
 
-An unknown rule ID is a usage error that names the ID, with a suggestion to run `bal scan --list-rules`. It has no `Try:` command, because the fix needs a rule ID that only the user can pick. The scan never guesses a near match.
+An unknown rule ID is a usage error that names the ID, with a suggestion to run `bal scan --list-rules`. The scan never suggests or guesses a near-match rule ID.
 
 ```
 bal scan: error: unknown rule 'ballerina:99'

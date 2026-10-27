@@ -3,7 +3,7 @@
 - Authors - Charana Manawathilake
 - Reviewed by - TBD
 - Created date - 2026-10-26
-- Updated date - 2026-10-26
+- Updated date - 2026-10-27
 - Issue - [1497](https://github.com/ballerina-platform/ballerina-spec/issues/1497)
 - State - Submitted
 
@@ -11,10 +11,11 @@
 
 This proposal gives `bal scan` a documented set of exit codes and an opt-in gate, so whatever runs the scan, such as a script, a Git hook or a CI/CD pipeline, can fail on findings and tell findings apart from configuration errors and tool failures.
 
-- Exit code `0` means the scan succeeded, `1` means the gate was tripped, and `2` to `6` mean usage, configuration, project, plugin and internal errors.
-- Two new options, `--fail-on-severity <BLOCKER|HIGH|MEDIUM|LOW|INFO|NONE>` and `--fail-on-count <n>`, also settable in `Scan.toml`, define the gate. The scan fails with `1` when the number of issues at or above the severity reaches the count.
+- `bal scan` uses the standard exit codes of Ballerina CLI tools: `0` for success, `1` for a runtime error, `2` for a usage error, `3` for an invalid target and `130` for an interrupt. A tripped gate exits with `1`.
+- Every failure is reported on standard error with a `kind`, such as `gate-failed` or `invalid-config`, so a caller can tell a tripped gate from a tool error without parsing the message.
+- Two new options, `--fail-on-severity <BLOCKER|HIGH|MEDIUM|LOW|INFO|NONE>` and `--fail-on-count <n>`, also settable in `Scan.toml`, define the gate. The scan fails when the number of issues at or above the severity reaches the count.
 
-By default no gate is set, so findings never fail the scan and it exits with `0`. Errors, however, always exit with a code of `2` or more, so a broken `Scan.toml` no longer passes silently.
+By default no gate is set, so findings never fail the scan and it exits with `0`. Errors, however, always exit with a non-zero code, so a broken `Scan.toml` no longer passes silently.
 
 ## Motivation
 
@@ -38,15 +39,16 @@ Three gaps follow from this.
 
 - **Issues never fail the scan.** There is no way to say "fail on any `BLOCKER`" or "fail on ten or more issues". The `Severity` enum (`BLOCKER`, `HIGH`, `MEDIUM`, `LOW`, `INFO`) already exists, but nothing reads it when the tool exits.
 - **Tool and configuration errors look like success.** Errors are printed to `outputStream` (standard output), not `errorStream`, and the method returns normally. A typo in `Scan.toml` gives a successful run that scanned nothing.
+- **Failures cannot be told apart.** The few failures that do exit non-zero carry no machine-readable reason, so a caller cannot tell a compilation error from a failed report write.
 
 Anything that runs `bal scan` and acts on the result needs this contract to fail for the right reason and to report it clearly. CI/CD integrations, such as the [`scan-ballerina` GitHub Action](1507_scan_github_action.md), are one example.
 
 ## Goals
 
-- Define a stable, documented set of exit codes for `bal scan`.
+- Define a stable, documented exit code and error `kind` for every outcome of `bal scan`, using the standard exit codes of Ballerina CLI tools.
 - Keep the scan exiting with `0` on findings unless a gate is set, so existing scripts and pipelines keep passing.
 - Let users fail the scan on a number of issues, on issues at or above a severity, or on both, from the command line or from `Scan.toml`.
-- Make every tool, configuration and project error exit with a code of `2` or more.
+- Make every tool, configuration and project error exit with a non-zero code.
 - Write errors and the gate result to standard error.
 
 ## Non-Goals
@@ -58,27 +60,69 @@ Anything that runs `bal scan` and acts on the result needs this contract to fail
 
 ## Design
 
-The design has three parts: a fixed set of exit codes from `0` to `6`, an opt-in gate made of a severity and a count, and errors that always exit with a code of `2` or more.
+The design has three parts: the standard exit codes with a `kind` for each failure, an opt-in gate made of a severity and a count, and errors that always exit with a non-zero code.
 
 ### Exit codes
 
+`bal scan` uses only the following codes.
+
 | Code | Name | When | Today |
 | --- | --- | --- | --- |
-| `0` | `SUCCESS` | The scan completed, and no gate is set or the gate was not tripped | `0` |
-| `1` | `GATE_FAILED` | The scan completed, and the number of counted issues at or above `--fail-on-severity` is at least `--fail-on-count` | `0` |
-| `2` | `USAGE_ERROR` | Invalid command-line input: an unknown `--format` (`ERROR_017`), an invalid `--fail-on-severity` or `--fail-on-count` value, both include and exclude rules (`ERROR_016`), or an unknown rule ID (`ERROR_015`) | `0` |
-| `3` | `CONFIG_ERROR` | `Scan.toml` or a remote configuration cannot be read, a field is missing or invalid, a JAR download fails, or a rules JSON file is invalid (`ERROR_003` to `ERROR_007`, `ERROR_009` to `ERROR_012`, `ERROR_020`) | `0` |
-| `4` | `PROJECT_ERROR` | The project cannot be analyzed: an invalid path, load diagnostics, an empty package (`ERROR_002`) or compilation errors (`ERROR_019`) | `0`, or `1` for compilation errors |
-| `5` | `PLUGIN_ERROR` | An analyzer plugin fails to load (`ERROR_008`), a platform named in `--platforms` is not available, or a platform plugin throws in `init` or `onScan` | `0` |
-| `6` | `INTERNAL_ERROR` | An unexpected exception, or a report write failure (`ERROR_014`, or the workspace report `IOException`) | `1` |
+| `0` | Success | The scan completed, and no gate is set or the gate was not tripped | `0` |
+| `1` | Runtime error | The gate was tripped, or the scan could not be completed: a configuration, plugin, compilation or report error, or an unexpected exception | `0`, or `1` for compilation errors and report write failures |
+| `2` | Usage error | Invalid command-line input: an unknown `--format` (`ERROR_017`), an invalid `--fail-on-severity` or `--fail-on-count` value, both include and exclude rules (`ERROR_016`), or an unknown rule ID (`ERROR_015`) | `0` |
+| `3` | Invalid target | The path does not exist or cannot be loaded as a project, the project has load diagnostics such as an invalid `Ballerina.toml`, or the path is a `.bal` file inside a package | `0` |
+| `130` | Interrupted | The scan was interrupted with SIGINT | `130` |
 
-The codes are chosen so that:
+### Error kinds
 
-- A script can test `== 1` for "the code did not pass the gate" and `>= 2` for "the scan tool could not do its job".
-- Each error code points to who must act: whoever runs the command (`2`), the owner of `Scan.toml` (`3`), the code author (`4`), the plugin owner (`5`) or the scan tool team (`6`).
-- The codes are a small fixed enum, not a bitmask or a count, and stay below `64` to avoid the `sysexits` range and the codes shells use for signals (`128` and above).
+Every failure is reported on standard error with a `kind`. The `kind` says what went wrong, and its core kind decides the exit code.
 
-These codes are part of the documented scan tool contract. Adding a new code is a minor change. Changing the meaning of an existing code is a breaking change.
+| `kind` | Core kind | Exit code | When |
+| --- | --- | --- | --- |
+| `usage` | `usage` | `2` | Invalid command-line input, as listed for code `2` |
+| `invalid-target` | `invalid-target` | `3` | An invalid project, as listed for code `3` |
+| `gate-failed` | `runtime` | `1` | The number of counted issues at or above `--fail-on-severity` is at least `--fail-on-count` |
+| `invalid-config` | `invalid-input` | `1` | `Scan.toml` or a remote configuration cannot be read, a field is missing or invalid, or a rules JSON file is invalid (`ERROR_003`, `ERROR_004`, `ERROR_009` to `ERROR_012`, `ERROR_020`) |
+| `download-failed` | `runtime` | `1` | A remote configuration or a JAR cannot be downloaded (`ERROR_005` to `ERROR_007`) |
+| `compilation-error` | `invalid-input` | `1` | The package has compilation errors (`ERROR_019`) |
+| `empty-package` | `invalid-input` | `1` | The package has no sources to scan (`ERROR_002`) |
+| `plugin-error` | `runtime` | `1` | An analyzer plugin fails to load (`ERROR_008`), a platform named in `--platforms` is not available, or a platform plugin throws in `init` or `onScan` |
+| `report-error` | `runtime` | `1` | A report cannot be written (`ERROR_014`, or the workspace report `IOException`) |
+| `runtime` | `runtime` | `1` | An unexpected exception |
+
+This split means that:
+
+- A script can test `== 0` for "the scan passed", and any other code for "the scan did not pass".
+- A caller that needs to know why reads the `kind`: `gate-failed` means the code did not pass the gate, and any other `kind` means the scan tool could not do its job.
+- Each `kind` points to who must act: whoever runs the command (`usage`), the owner of the project (`invalid-target`, `compilation-error`, `empty-package`), the code author (`gate-failed`), the owner of `Scan.toml` (`invalid-config`), the network or the configuration host (`download-failed`), the plugin owner (`plugin-error`) or the scan tool team (`report-error`, `runtime`).
+
+### Error reports
+
+An error report is written to standard error. In text it is `bal scan: error: <message>`. The message names the path, option or value involved, is one line, starts in lowercase, and has no trailing period or stack trace.
+
+```
+bal scan: error: 6 issues at or above MEDIUM, limit 5 (BLOCKER: 1, HIGH: 2, MEDIUM: 3)
+```
+
+A problem in a file, such as `Scan.toml` or a rules JSON file, is a diagnostic in the form `<path>:<line>:<col>: error: <message>`, under the error report. A diagnostic for `Scan.toml` names the key, not the option.
+
+```
+bal scan: error: Scan.toml has 1 error
+Scan.toml:2:18: error: invalid value 'CRITICAL' for 'failOnSeverity'; expected BLOCKER, HIGH, MEDIUM, LOW, INFO or NONE
+```
+
+A usage error is followed by a one-line synopsis and a pointer to the help, and not by the full help.
+
+```
+bal scan: error: invalid value '0' for --fail-on-count; expected a whole number of 1 or more
+Usage: bal scan [OPTIONS] [<package>]
+Try 'bal scan --help' for more information.
+```
+
+An unknown rule ID is a usage error that names the ID and points to `bal scan --list-rules`. The scan never guesses a near match.
+
+Warnings, such as a deprecated option, are reported as `bal scan: warning: <message>` and never change the exit code.
 
 ### Gate
 
@@ -87,9 +131,9 @@ The gate has two settings.
 - `--fail-on-severity <severity>` selects the issues the gate counts: those at or above the severity. The values are `BLOCKER`, `HIGH`, `MEDIUM`, `LOW`, `INFO` and `NONE`.
 - `--fail-on-count <n>` is the number of selected issues at which the scan fails. It is a whole number of `1` or more.
 
-The scan exits with `1` when the number of selected issues is greater than or equal to the count. The settings combine as follows.
+The scan fails with `gate-failed` (exit code `1`) when the number of selected issues is greater than or equal to the count. The settings combine as follows.
 
-| `--fail-on-severity` | `--fail-on-count` | Exits with `1` when |
+| `--fail-on-severity` | `--fail-on-count` | Fails with `gate-failed` when |
 | --- | --- | --- |
 | Not set | Not set | Never. The gate is off |
 | Not set | `n` | There are `n` or more issues of any severity |
@@ -126,71 +170,66 @@ The gate follows these rules.
 1. **Order.** Severities follow the existing `Severity` enum: `BLOCKER` > `HIGH` > `MEDIUM` > `LOW` > `INFO`. An issue is at or above `X` when its severity is `X` or more severe.
 2. **Count.** The count is a threshold, not an allowance: `--fail-on-count=5` fails on the fifth issue, and allows four. The name says when the scan fails, matching `--fail-on-severity`.
 3. **Precedence.** Each setting is resolved on its own: the command-line option overrides `Scan.toml`, which overrides the default of not set. So a `Scan.toml` that sets `failOnSeverity = "HIGH"`, run with `--fail-on-count=3`, fails on three or more `BLOCKER` or `HIGH` issues. `--fail-on-severity=NONE` on the command line turns off a gate set in `Scan.toml`.
-4. **Validation.** Severity values are case-insensitive. An invalid severity, or a count that is not a whole number of `1` or more, exits with `2` on the command line and `3` in `Scan.toml`.
-5. **Exit code only.** The gate changes only the exit code. Console output, `scan_results.json`, SARIF, the HTML report and platform uploads always contain every issue.
+4. **Validation.** Severity values are case-insensitive. An invalid severity, or a count that is not a whole number of `1` or more, is a `usage` error (exit code `2`) on the command line and an `invalid-config` error (exit code `1`) in `Scan.toml`.
+5. **Exit code only.** The gate changes only the exit code and the error report. Console output, `scan_results.json`, SARIF, the HTML report and platform uploads always contain every issue.
 6. **Counted issues.** The gate counts the issues left after `--include-rules`, `--exclude-rules` and inline suppressions (`ExcludedIssue`). Excluded issues never count.
 7. **Rules without a severity.** A plugin rule can have no severity (`rule.severity() == null`). Such a rule uses the same fallback as `resolveSarifLevel`: `BUG` counts as `HIGH`, `VULNERABILITY` as `MEDIUM` and `CODE_SMELL` as `LOW`. One mapping serves both SARIF and the gate.
-8. **Errors win.** When both a tool error and a tripped gate occur, the error code is returned, because the issue list may be incomplete. No gate setting, `NONE` included, hides codes `2` to `6`.
-9. **Workspaces.** In a workspace, every package is scanned, and the issues of all packages are counted together against the gate. The tool exits with the highest error code if any package had an error, otherwise `1` if the gate was tripped, otherwise `0`. Empty packages are reported with `4` instead of being skipped silently.
-10. **Standard error.** Every error diagnostic moves from `outputStream` to `errorStream`. When the exit code is not `0`, a summary line is written to standard error, for example:
-
-    ```
-    error: scan failed: 6 issues at or above MEDIUM, limit 5 (BLOCKER: 1, HIGH: 2, MEDIUM: 3)
-    ```
+8. **Errors win.** When both a tool error and a tripped gate occur, the error is reported instead of `gate-failed`, because the issue list may be incomplete. No gate setting, `NONE` included, hides an error.
+9. **Workspaces.** In a workspace, every package is scanned, and the issues of all packages are counted together against the gate. If any package had an error, the scan exits with that error, and the error report lists the error of each failing package in its diagnostics. Otherwise it fails with `gate-failed` if the gate was tripped, and exits with `0` if not. Empty packages are reported as `empty-package` instead of being skipped silently.
+10. **Standard error.** Every error diagnostic moves from `outputStream` to `errorStream`, and the error report is the last thing written to standard error.
 
 ### Execution order
 
-Each stage of a scan can stop it with its own exit code. The gate is evaluated last, after the reports are written, so a failing scan still leaves a full report behind.
+Each stage of a scan can stop it with its own exit code and `kind`. The gate is evaluated last, after the reports are written, so a failing scan still leaves a full report behind.
 
-1. Parse the command-line options. Fails with `2`.
-2. Load `Scan.toml`, remote configurations and rule files, and resolve the gate. Fails with `3`.
-3. Load the project and compile it. Fails with `4`.
-4. Load analyzer and platform plugins. Fails with `5`.
-5. Run the analysis, write the reports, and send results to platforms. Fails with `5` for a platform plugin error, or `6` for a report or unexpected error.
-6. Evaluate the gate. Exits with `1` or `0`.
+1. Parse the command-line options. Fails with `2` (`usage`).
+2. Load the project. Fails with `3` (`invalid-target`).
+3. Load `Scan.toml`, remote configurations and rule files, and resolve the gate. Fails with `1` (`invalid-config` or `download-failed`).
+4. Compile the project. Fails with `1` (`compilation-error` or `empty-package`).
+5. Load analyzer and platform plugins. Fails with `1` (`plugin-error`).
+6. Run the analysis, write the reports, and send results to platforms. Fails with `1` (`plugin-error`, `report-error` or `runtime`).
+7. Evaluate the gate. Fails with `1` (`gate-failed`), or exits with `0`.
 
 ### Compatibility
 
 - Findings still exit with `0` by default, because no gate is set.
-- Scripts and pipelines that relied on a `0` exit when `Scan.toml` is broken, a plugin fails to load or a package is empty will start failing. This is the intent of the change.
-- Compilation errors move from `1` to `4`. Scripts that test for a non-zero exit are unaffected.
+- Scripts and pipelines that relied on a `0` exit when the project path is invalid, `Scan.toml` is broken, a plugin fails to load or a package is empty will start failing. This is the intent of the change.
+- Compilation errors and report write failures keep exiting with `1`.
 
 ## Alternatives
 
-**One exit code per severity.** The exit code would be the highest severity found, for example `1` for `INFO` up to `5` for `BLOCKER`. This is not adopted.
+**One exit code per severity.** The exit code would be the highest severity found, for example `1` for `INFO` up to `5` for `BLOCKER`. This is not possible under the Ballerina CLI Tool Design Guide.
 
-- The scan report already says which severities were found and how many of each, in `scan_results.json`, SARIF, the HTML report and the summary line. An exit code that repeats part of it adds nothing.
-- Most callers ask one question: pass or fail. Shells, build tools and CI/CD systems treat any non-zero exit as a failure, so a team that wants to tolerate `LOW` but block `HIGH` would need a wrapper around every call. With `--fail-on-severity`, the fail point is set in the tool and in `Scan.toml`, where it is versioned and reviewed.
-- Severity codes and error codes would share the same small range, which loses the simple `== 1` and `>= 2` rule.
-- A non-zero exit on any finding would break every existing script and pipeline, so a gate would still be needed underneath.
+- The guide's exit code table is closed, and a tool must not define other codes (section 8). Codes `2` and `3` already mean a usage error and an invalid target in every `bal` tool, `4` means overwrite refused, and `5` is not allowed at all.
+- The design does not need it either. The scan report already says which severities were found and how many of each, and `--fail-on-severity` sets the fail point in the tool and in `Scan.toml`, where it is versioned and reviewed.
 
-**No separate codes for tool failures.** Errors would keep exiting with `0`, as today, or every failure, whether findings or errors, would share one non-zero code. This is not adopted.
+**A separate exit code for each kind of failure.** A tripped gate, a configuration error, a plugin error and an internal error would each get their own code. This is not possible under the Ballerina CLI Tool Design Guide.
 
-- With `0`, a broken `Scan.toml`, a failed JAR download or an empty package gives a green run that scanned nothing. This is the problem the proposal fixes.
-- With one shared code, a caller cannot tell "the code did not pass the gate" from "the scan tool could not run", so it cannot report the right reason, retry a failed download, or decide who should act. Separate codes `2` to `6` answer that without parsing output.
-- A caller that wants to ignore every outcome can still do so itself, for example with `|| true` in a shell, or the equivalent setting of a CI/CD system. The tool reports what happened, and the caller decides what to do with it.
+- The guide's exit code table is closed, and a tool must not define other codes (section 8). Every failure that is not a usage error, an invalid target, a refused overwrite or an interrupt exits with `1`, so a tripped gate, a configuration error, a plugin error and an internal error all share it.
+- The design does not need it either. Shells, build tools and CI/CD systems act on zero and non-zero, and the error report on standard error says which failure occurred.
 
-**A bitmask exit code.** Each bit would stand for a severity, a category or an error kind, so several outcomes could be combined in one code. This is not adopted.
+**Keep errors exiting with `0`.** This is not adopted. A broken `Scan.toml`, a failed JAR download or an empty package would keep giving a green run that scanned nothing, which is the problem the proposal fixes. A caller that wants to ignore every outcome can still do so itself, for example with `|| true` in a shell, or the equivalent setting of a CI/CD system.
 
-- A scan needs three things: a report of every issue, a severity for each issue, and a fail point. The report and the severities are already there, and the gate provides the fail point, so the exit code only has to say pass, fail or error.
-- Bitmasks need bit tests in every script that calls the scan, such as `$(( rc & 4 ))`, which are easy to get wrong, and a few bits cannot say how many issues of each severity were found.
-- Error kinds and severities in one bitmask make it unclear which outcome wins, while a fixed enum with "errors win" gives one answer.
+**A bitmask exit code.** Each bit would stand for a severity, a category or a type of failure, so several outcomes could be combined in one code. This is not possible under the Ballerina CLI Tool Design Guide.
+
+- The guide's exit code table is closed, and a tool must not define other codes (section 8). Combined codes such as `5` or `6` are not in the table, and single bits would reuse `1`, `2` and `4`, which already mean a runtime error, a usage error and a refused overwrite.
+- The design does not need it either. The report and the severities are already there, and the gate provides the fail point, so the exit code only has to say pass or fail.
 
 ## Testing
 
-- **Exit codes.** Unit tests replace the exit handler and assert the code for each situation in the [exit codes](#exit-codes) table: invalid options, each `Scan.toml` and remote configuration error, an invalid path, load diagnostics, an empty package, compilation errors, a plugin that fails to load, a missing platform, a platform plugin that throws, and a report write failure.
+- **Exit codes and kinds.** Unit tests replace the exit handler and assert the code and the `kind` for each situation in the [error kinds](#error-kinds) table: invalid options, an invalid path, a `.bal` file inside a package, load diagnostics, each `Scan.toml` and remote configuration error, a failed download, compilation errors, an empty package, a plugin that fails to load, a missing platform, a platform plugin that throws, a report write failure, and an interrupt.
 - **Gate.** Tests cover each row of the [gate](#gate) table against packages with issues of each severity, including counts just below, at and above the limit. They also cover precedence of each setting between the command line and `Scan.toml`, `--fail-on-severity=NONE` overriding `Scan.toml`, case-insensitive severities, invalid severities and counts (`0`, negative and non-numeric) from both sources, issues excluded by `--include-rules`, `--exclude-rules` and inline suppressions, and plugin rules without a severity.
 - **Default.** A scan with issues of every severity and no gate exits with `0`.
-- **Errors win.** A scan with both a tripped gate and an error exits with the error code, including with `--fail-on-severity=NONE`.
-- **Workspaces.** A workspace with a mix of clean packages, packages with issues, empty packages and packages with errors exits with the most severe outcome, scans every package, and counts issues across packages.
-- **Reports.** A scan that exits with `1` still writes `scan_results.json`, SARIF and the HTML report with every issue.
-- **Platform-triggered runs and the language server.** A `--platform-triggered` run exits with `0` when the gate would trip and with the error code on errors. `ScanLanguageServerTool` never exits the process.
-- **Output streams.** Error diagnostics and the summary line are written to standard error, not standard output.
-- **SARIF.** `INFO` rules have `level: "note"`, and `VULNERABILITY` rules have the expected `security-severity`.
+- **Errors win.** A scan with both a tripped gate and an error reports the error `kind`, not `gate-failed`, including with `--fail-on-severity=NONE`.
+- **Workspaces.** A workspace with a mix of clean packages, packages with issues, empty packages and packages with errors scans every package, counts issues across packages, and reports every failing package in the error report.
+- **Reports.** A scan that fails with `gate-failed` still writes `scan_results.json`, SARIF and the HTML report with every issue.
+- **Error reports.** Text reports follow the `bal scan: error: <message>` form, `Scan.toml` problems are reported as `<path>:<line>:<col>` diagnostics, and usage errors print the synopsis and help pointer but not the full help.
+- **Output streams.** Error diagnostics and the error report are written to standard error, not standard output.
 
 ## Risks and Assumptions
 
-- Scripts and pipelines that pass today because errors exit with `0` will start failing after the upgrade. The release notes list the affected situations and the new codes.
+- Scripts and pipelines that pass today because errors exit with `0` will start failing after the upgrade. The release notes list the affected situations, their exit codes and kinds.
+- A tripped gate and a tool error share exit code `1`. A caller that treats them differently must read the `kind` from the error report. The documentation must make this clear.
 - Calling `Runtime.getRuntime().exit` from a tool bypasses the launcher's own exit handling. This assumes the launcher does no work after a tool command returns that the scan tool would skip.
 - Some tools and wrappers may parse `bal scan` standard output for errors. Moving error diagnostics to standard error changes what they see.
 - Many tools use a "maximum allowed" count, which fails above the number. `--fail-on-count` fails at the number. The name and the documentation must make this clear to avoid off-by-one gates.
@@ -206,7 +245,7 @@ Each stage of a scan can stop it with its own exit code. The gate is evaluated l
 - **Per-severity count limits.** A table in `Scan.toml` with a separate count for each severity, for example failing on one `BLOCKER` or on ten `MEDIUM` issues.
 - **New-code gating.** A baseline file, or a `--new-code-since <commit>` option, so a team can gate on the issues a change introduces without first fixing every existing issue.
 - **Per-rule severity overrides** in `Scan.toml`, so a team can raise or lower the severity of a rule for gating and reports.
-- **Launcher support for exit codes**, so `BLauncherException` can carry a code and the scan tool no longer exits the process itself.
+- **Launcher support for exit codes**, so the scan tool throws one exception type that carries the exit code and the `kind`, and no longer exits the process itself.
 
 ## References
 
@@ -214,4 +253,3 @@ Each stage of a scan can stop it with its own exit code. The gate is evaluated l
 - [Proposal #1507: Introduce a GitHub Action to run `bal scan` in CI/CD pipelines](1507_scan_github_action.md)
 - [Ballerina scan tool documentation](https://ballerina.io/learn/scan-tool/)
 - [ballerina-lang launcher `Main.java`](https://github.com/ballerina-platform/ballerina-lang/blob/master/cli/ballerina-cli/src/main/java/io/ballerina/cli/launcher/Main.java)
-- [GitHub: SARIF support for code scanning](https://docs.github.com/en/code-security/code-scanning/integrating-with-code-scanning/sarif-support-for-code-scanning)
